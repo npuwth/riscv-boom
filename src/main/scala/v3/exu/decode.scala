@@ -30,7 +30,12 @@ abstract trait DecodeConstants
 {
   val xpr64 = Y // TODO inform this from xLen
   val DC2 = BitPat.dontCare(2) // Makes the listing below more readable
+  // BitPat是BitPattern的缩写，在Chisel中用于进行bit pattern匹配
+  // 上面的DC2定义了"b??"，表示匹配一个两位宽的信号，其具体值并不关心
+  // 另一个例子，BitPat("b1??0")表示匹配信号：1xx0
   def decode_default: List[BitPat] =
+  // 定义一些默认值
+  // N: false, Y: true, X: dont care
             //                                                                  frs3_en                        wakeup_delay
             //     is val inst?                                                 |  imm sel                     |    bypassable (aka, known/fixed latency)
             //     |  is fp inst?                                               |  |     uses_ldq              |    |  is_br
@@ -45,6 +50,10 @@ abstract trait DecodeConstants
               List(N, N, X, uopX    , IQT_INT, FU_X   , RT_X  , DC2    ,DC2    ,X, IS_X, X, X, X, X, N, M_X,   DC2, X, X, N, N, X, CSR.X)
 
   val table: Array[(BitPat, List[BitPat])]
+  // 译码表被定义成由(Bit Pattern, List)构成的数组，前者用于匹配具体的RISCV指令，
+  // 后者则是译码结果构成的List，List中每一项也都被声明为一个BitPat，详细定义在consts.scala中
+  // 译码结果一共24项，包括是否浮点、uop类型、寄存器类型、是否amo、是否分支、是否ecall等等
+  // 这里的译码结果主要是控制信号，不包括寄存器号、立即数
 }
 // scalastyle:on
 
@@ -77,18 +86,20 @@ class CtrlSigs extends Bundle
   val inst_unique     = Bool()
   val flush_on_commit = Bool()
   val csr_cmd         = UInt(freechips.rocketchip.rocket.CSR.SZ.W)
-  val rocc            = Bool()
+  val rocc            = Bool() // 相比List[BitPat]多了这一项
 
   def decode(inst: UInt, table: Iterable[(BitPat, List[BitPat])]) = {
+    // 该函数在下面的DecodeUnit中调用
     val decoder = freechips.rocketchip.rocket.DecodeLogic(inst, XDecode.decode_default, table)
+    // 复用rocket中的译码逻辑，传入：当前需要译码的指令、默认值、译码表
     val sigs =
       Seq(legal, fp_val, fp_single, uopc, iq_type, fu_code, dst_type, rs1_type,
           rs2_type, frs3_en, imm_sel, uses_ldq, uses_stq, is_amo,
           is_fence, is_fencei, mem_cmd, wakeup_delay, bypassable,
           is_br, is_sys_pc2epc, inst_unique, flush_on_commit, csr_cmd)
-      sigs zip decoder map {case(s,d) => s := d}
-      rocc := false.B
-      this
+      sigs zip decoder map {case(s,d) => s := d} // 对sigs中的信号一一赋值，即译码结果
+      rocc := false.B // 表示协处理器指令，赋值为false
+      this // 返回sigs
   }
 }
 
@@ -450,19 +461,24 @@ object RoCCDecode extends DecodeConstants
 }
 
 
-
-
+// ------------------------------------------------------------//
+// 以上主要定义不同指令的译码结果，即译码表
+// 以下开始定义译码模块，即 DecodeUnit
+// （后者在core.scala中被实例化）
+// ------------------------------------------------------------//
 
 /**
  * IO bundle for the Decode unit
  */
 class DecodeUnitIo(implicit p: Parameters) extends BoomBundle
-{
+{ //定义DecodeUnit的IO信号
+  // 输入、输出分别是译码前后的 MicroOp
   val enq = new Bundle { val uop = Input(new MicroOp()) }
   val deq = new Bundle { val uop = Output(new MicroOp()) }
 
   // from CSRFile
   val status = Input(new freechips.rocketchip.rocket.MStatus())
+  // 读取当前CSR中MStatus的值
   val csr_decode = Flipped(new freechips.rocketchip.rocket.CSRDecodeIO)
   val interrupt = Input(Bool())
   val interrupt_cause = Input(UInt(xLen.W))
@@ -473,21 +489,25 @@ class DecodeUnitIo(implicit p: Parameters) extends BoomBundle
  */
 class DecodeUnit(implicit p: Parameters) extends BoomModule
   with freechips.rocketchip.rocket.constants.MemoryOpConstants
-{
+{ //定义译码模块，根据单条指令得到译码后的 MicroOp
+  // 注意：每条指令在译码单元译码时是相互独立的，在重命名时处理数据依赖关系，
+  //      在下面的BranchMaskGenerationLogic中处理控制依赖关系
   val io = IO(new DecodeUnitIo)
 
   val uop = Wire(new MicroOp())
-  uop := io.enq.uop
+  uop := io.enq.uop // uop即deq，先用enq赋上初值
 
   var decode_table = XDecode.table
   if (usingFPU) decode_table ++= FDecode.table
   if (usingFPU && usingFDivSqrt) decode_table ++= FDivSqrtDecode.table
   if (usingRoCC) decode_table ++= RoCCDecode.table
   decode_table ++= (if (xLen == 64) X64Decode.table else X32Decode.table)
+  // 根据 BOOM的配置得到译码表
 
   val inst = uop.inst
 
   val cs = Wire(new CtrlSigs()).decode(inst, decode_table)
+  // 进行译码，单条指令译码的控制信号结果
 
   // Exception Handling
   io.csr_decode.inst := inst
@@ -506,11 +526,16 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
     (cs.fp_val && !cs.fp_single) && !io.status.isa('d'-'a') ||
     csr_en && (io.csr_decode.read_illegal || !csr_ren && io.csr_decode.write_illegal) ||
     ((sfence || system_insn) && io.csr_decode.system_illegal)
+  // 分情况讨论，判断是否为“非法指令”，若是则触发异常
 
 //     cs.div && !csr.io.status.isa('m'-'a') || TODO check for illegal div instructions
 
-  def checkExceptions(x: Seq[(Bool, UInt)]) =
+  def checkExceptions(x: Seq[(Bool, UInt)]) = {
     (x.map(_._1).reduce(_||_), PriorityMux(x))
+    // 返回一个(Bool: xcpt_valid, UInt: xcpt_cause)的元组
+    // 前者：提取出Seq中所有Bool进行一个缩减或，表示当前有无异常发生（任何异常）
+    // 后者：对x使用优先级多选器，选出优先级最高的那个UInt值（优先级最高的异常号）
+  }
 
   val (xcpt_valid, xcpt_cause) = checkExceptions(List(
     (io.interrupt && !io.enq.uop.is_sfb, io.interrupt_cause),  // Disallow interrupts while we are handling a SFB
@@ -519,12 +544,13 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
     (uop.xcpt_pf_if,                     (Causes.fetch_page_fault).U),
     (uop.xcpt_ae_if,                     (Causes.fetch_access).U),
     (id_illegal_insn,                    (Causes.illegal_instruction).U)))
+  // 优先级：SFB > bp_debug > bp_xcpt > 取指page falult > 取指地址异常 > 非法指令
 
   uop.exception := xcpt_valid
   uop.exc_cause := xcpt_cause
 
   //-------------------------------------------------------------
-
+  // 下面主要对uop（即deq）进行赋值，根据控制信号和指令本身
   uop.uopc       := cs.uopc
   uop.iq_type    := cs.iq_type
   uop.fu_code    := cs.fu_code
@@ -532,17 +558,19 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   // x-registers placed in 0-31, f-registers placed in 32-63.
   // This allows us to straight-up compare register specifiers and not need to
   // verify the rtypes (e.g., bypassing in rename).
-  uop.ldst       := inst(RD_MSB,RD_LSB)
-  uop.lrs1       := inst(RS1_MSB,RS1_LSB)
-  uop.lrs2       := inst(RS2_MSB,RS2_LSB)
-  uop.lrs3       := inst(RS3_MSB,RS3_LSB)
+  uop.ldst       := inst(RD_MSB,RD_LSB)    // 第07-11位
+  uop.lrs1       := inst(RS1_MSB,RS1_LSB)  // 第15-19位
+  uop.lrs2       := inst(RS2_MSB,RS2_LSB)  // 第20-24位
+  uop.lrs3       := inst(RS3_MSB,RS3_LSB)  // 第27-31位
 
   uop.ldst_val   := cs.dst_type =/= RT_X && !(uop.ldst === 0.U && uop.dst_rtype === RT_FIX)
+  // 排除情况：定点指令写回0号寄存器
   uop.dst_rtype  := cs.dst_type
   uop.lrs1_rtype := cs.rs1_type
   uop.lrs2_rtype := cs.rs2_type
   uop.frs3_en    := cs.frs3_en
 
+  // 以下与SFB优化相关，暂未研究
   uop.ldst_is_rs1 := uop.is_sfb_shadow
   // SFB optimization
   when (uop.is_sfb_shadow && cs.rs2_type === RT_X) {
@@ -581,6 +609,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
 
   // repackage the immediate, and then pass the fewest number of bits around
   val di24_20 = Mux(cs.imm_sel === IS_B || cs.imm_sel === IS_S, inst(11,7), inst(24,20))
+  // 两种格式：SB类型（branch）、S类型（store）
   uop.imm_packed := Cat(inst(31,25), di24_20, inst(19,12))
 
   //-------------------------------------------------------------
@@ -600,6 +629,11 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   io.deq.uop := uop
 }
 
+// ------------------------------------------------------------//
+// 以下开始定义分支译码模块，即 BranchDecode
+// （在frontend.scala中被实例化）
+// ------------------------------------------------------------//
+
 /**
  * Smaller Decode unit for the Frontend to decode different
  * branches.
@@ -607,7 +641,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   */
 
 class BranchDecodeSignals(implicit p: Parameters) extends BoomBundle
-{
+{ //定义BranchDecode的Output信号
   val is_ret   = Bool()
   val is_call  = Bool()
   val target   = UInt(vaddrBitsExtended.W)
@@ -621,7 +655,7 @@ class BranchDecodeSignals(implicit p: Parameters) extends BoomBundle
 }
 
 class BranchDecode(implicit p: Parameters) extends BoomModule
-{
+{ //定义分支译码模块，输入当前指令和PC
   val io = IO(new Bundle {
     val inst    = Input(UInt(32.W))
     val pc      = Input(UInt(vaddrBitsExtended.W))
@@ -629,9 +663,9 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
     val out = Output(new BranchDecodeSignals)
   })
 
-  val bpd_csignals =
-    freechips.rocketchip.rocket.DecodeLogic(io.inst,
-                  List[BitPat](N, N, N, N, X),
+  val bpd_csignals = //同样调用DecodeLogic译码得到控制信号
+    freechips.rocketchip.rocket.DecodeLogic(io.inst,    //当前指令
+                  List[BitPat](N, N, N, N, X),          //默认值
 ////                               is br?
 ////                               |  is jal?
 ////                               |  |  is jalr?
@@ -639,7 +673,7 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
 ////                               |  |  |  shadowable
 ////                               |  |  |  |  has_rs2
 ////                               |  |  |  |  |
-            Array[(BitPat, List[BitPat])](
+            Array[(BitPat, List[BitPat])](              //译码表
                JAL         -> List(N, Y, N, N, X),
                JALR        -> List(N, N, Y, N, X),
                BEQ         -> List(Y, N, N, N, X),
@@ -691,11 +725,16 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
   val cs_is_shadowable = bpd_csignals(3)(0)
   val cs_has_rs2 = bpd_csignals(4)(0)
 
+  // 下面主要根据译码结果对输出进行赋值
   io.out.is_call := (cs_is_jal || cs_is_jalr) && GetRd(io.inst) === RA
+  // call指令：jal 或 jalr 且 目标寄存器为1号
   io.out.is_ret  := cs_is_jalr && GetRs1(io.inst) === BitPat("b00?01") && GetRd(io.inst) === X0
+  // ret指令：jalr 且 读00x01 且 写0号寄存器
 
   io.out.target := Mux(cs_is_br, ComputeBranchTarget(io.pc, io.inst, xLen),
                                  ComputeJALTarget(io.pc, io.inst, xLen))
+  // 两种格式的地址：branch、jump
+
   io.out.cfi_type :=
     Mux(cs_is_jalr,
       CFI_JALR,
@@ -705,6 +744,7 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
       CFI_BR,
       CFI_X)))
 
+  // 以下与SFB优化相关，暂未研究
   val br_offset = Cat(io.inst(7), io.inst(30,25), io.inst(11,8), 0.U(1.W))
   // Is a sfb if it points forwards (offset is positive)
   io.out.sfb_offset.valid := cs_is_br && !io.inst(31) && br_offset =/= 0.U && (br_offset >> log2Ceil(icBlockBytes)) === 0.U
@@ -715,6 +755,11 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
     (io.inst === ADD && GetRs1(io.inst) === X0)
   )
 }
+
+// ------------------------------------------------------------//
+// 以下开始定义分支掩码生成模块，即 BranchMaskGenerationLogic
+// （在core.scala中被实例化）
+// ------------------------------------------------------------//
 
 /**
  * Track the current "branch mask", and give out the branch mask to each micro-op in Decode
@@ -727,37 +772,39 @@ class BranchMaskGenerationLogic(val pl_width: Int)(implicit p: Parameters) exten
 {
   val io = IO(new Bundle {
     // guess if the uop is a branch (we'll catch this later)
-    val is_branch = Input(Vec(pl_width, Bool()))
+    val is_branch = Input(Vec(pl_width, Bool())) // 该pipeline slot是否为分支
     // lock in that it's actually a branch and will fire, so we update
     // the branch_masks.
-    val will_fire = Input(Vec(pl_width, Bool()))
+    val will_fire = Input(Vec(pl_width, Bool())) // 这条指令是否会发射（还是阻塞）
 
     // give out tag immediately (needed in rename)
     // mask can come later in the cycle
-    val br_tag    = Output(Vec(pl_width, UInt(brTagSz.W)))
-    val br_mask   = Output(Vec(pl_width, UInt(maxBrCount.W)))
+    val br_tag    = Output(Vec(pl_width, UInt(brTagSz.W)))    // 这条指令的“分支标签”
+    val br_mask   = Output(Vec(pl_width, UInt(maxBrCount.W))) // 后续指令的“分支掩码”，独热码
 
-     // tell decoders the branch mask has filled up, but on the granularity
-     // of an individual micro-op (so some micro-ops can go through)
-    val is_full   = Output(Vec(pl_width, Bool()))
+    // tell decoders the branch mask has filled up, but on the granularity
+    // of an individual micro-op (so some micro-ops can go through)
+    val is_full   = Output(Vec(pl_width, Bool())) // 分支掩码使用完了
 
-    val brupdate         = Input(new BrUpdateInfo())
+    val brupdate         = Input(new BrUpdateInfo()) // 分支解决信息
     val flush_pipeline = Input(Bool())
 
     val debug_branch_mask = Output(UInt(maxBrCount.W))
   })
 
-  val branch_mask = RegInit(0.U(maxBrCount.W))
+  val branch_mask = RegInit(0.U(maxBrCount.W)) // 流水线寄存器，初始化为0
+  // 表示当前指令能看到的branch，若某位为1，表示受对应这条分支指令的影响
 
   //-------------------------------------------------------------
   // Give out the branch tag to each branch micro-op
 
-  var allocate_mask = branch_mask
+  var allocate_mask = branch_mask // 分配的中间结果
   val tag_masks = Wire(Vec(pl_width, UInt(maxBrCount.W)))
 
   for (w <- 0 until pl_width) {
     // TODO this is a loss of performance as we're blocking branches based on potentially fake branches
     io.is_full(w) := (allocate_mask === ~(0.U(maxBrCount.W))) && io.is_branch(w)
+    // 已满：allocate_mask全1 且 当前是条分支指令
 
     // find br_tag and compute next br_mask
     val new_br_tag = Wire(UInt(brTagSz.W))
@@ -765,14 +812,15 @@ class BranchMaskGenerationLogic(val pl_width: Int)(implicit p: Parameters) exten
     tag_masks(w) := 0.U
 
     for (i <- maxBrCount-1 to 0 by -1) {
-      when (~allocate_mask(i)) {
+      when (~allocate_mask(i)) { // 从大到小遍历，看是否为0（未分配）
         new_br_tag := i.U
-        tag_masks(w) := (1.U << i.U)
+        tag_masks(w) := (1.U << i.U) // 分配的mask，后面会进行一个或
       }
     }
 
-    io.br_tag(w) := new_br_tag
+    io.br_tag(w) := new_br_tag // 输出新分配的分支标签
     allocate_mask = Mux(io.is_branch(w), tag_masks(w) | allocate_mask, allocate_mask)
+    // 更新中间结果
   }
 
   //-------------------------------------------------------------
@@ -782,19 +830,24 @@ class BranchMaskGenerationLogic(val pl_width: Int)(implicit p: Parameters) exten
   var curr_mask = branch_mask
   for (w <- 0 until pl_width) {
     io.br_mask(w) := GetNewBrMask(io.brupdate, curr_mask)
+    // 消除该已解决的分支的影响：（用于输出br_mask，可以理解为下面GetNewBrMask的bypass）
+    // curr_mask & ~brupdate.b1.resolve_mask
     curr_mask = Mux(io.will_fire(w), tag_masks(w) | curr_mask, curr_mask)
+    // 这周期分配出去的分支掩码，进行一个或
   }
 
   //-------------------------------------------------------------
   // Update the current branch_mask
 
   when (io.flush_pipeline) {
-    branch_mask := 0.U
+    branch_mask := 0.U // 清空流水线同时也清空分支掩码，当前看不到分支指令
   } .otherwise {
     val mask = Mux(io.brupdate.b2.mispredict,
-      io.brupdate.b2.uop.br_mask,
-      ~(0.U(maxBrCount.W)))
+      io.brupdate.b2.uop.br_mask, // 发生错误的推测，该分支后的所有分支失效，分支掩码回退至该br_mask
+      ~(0.U(maxBrCount.W))) // 正确推测，不变（与上全1）
     branch_mask := GetNewBrMask(io.brupdate, curr_mask) & mask
+    // 消除该已解决的分支的影响：（用于更新branch_mask）
+    // curr_mask & ~brupdate.b1.resolve_mask
   }
 
   io.debug_branch_mask := branch_mask
