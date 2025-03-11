@@ -570,7 +570,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   uop.lrs2_rtype := cs.rs2_type
   uop.frs3_en    := cs.frs3_en
 
-  // 以下与SFB优化相关，暂未研究
+  // 以下与SFB优化相关，暂未研究（TODO）
   uop.ldst_is_rs1 := uop.is_sfb_shadow
   // SFB optimization
   when (uop.is_sfb_shadow && cs.rs2_type === RT_X) {
@@ -744,7 +744,7 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
       CFI_BR,
       CFI_X)))
 
-  // 以下与SFB优化相关，暂未研究
+  // 以下与SFB优化相关，暂未研究（TODO）
   val br_offset = Cat(io.inst(7), io.inst(30,25), io.inst(11,8), 0.U(1.W))
   // Is a sfb if it points forwards (offset is positive)
   io.out.sfb_offset.valid := cs_is_br && !io.inst(31) && br_offset =/= 0.U && (br_offset >> log2Ceil(icBlockBytes)) === 0.U
