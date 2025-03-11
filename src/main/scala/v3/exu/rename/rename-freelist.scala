@@ -86,7 +86,7 @@ class RenameFreeList(
   // 将sels和sel_fire（是否需要使用）进行取与，再进行reduce
   val br_deallocs = br_alloc_lists(io.brupdate.b2.uop.br_tag) & Fill(n, io.brupdate.b2.mispredict)
   // br_alloc_lists表示这条br指令之后的所有指令分配的物理寄存器（即错误路径产生的影响）
-  // 因此，在发生mispredict后，用其进行dealloc（释放，即和原始freelist按位或）
+  // 因此，在发生mispredict后，用其进行dealloc（释放，即和当前freelist按位或）
   val dealloc_mask = io.dealloc_pregs.map(d => UIntToOH(d.bits)(numPregs-1,0) & Fill(n,d.valid)).reduce(_|_) | br_deallocs
   // 另一种dealloc来自Commit Stage（stale_pdst），和上面的br_dealloc进行按位或
 
